@@ -51,12 +51,13 @@ def show_validation(result: ValidationResult, name: str) -> None:
         print(f"  {error.message}\n")
 
 
-def export(name_or_id: str, output_directory: str, store: ObjectStore, manifest: Manifest) -> None:
+def export(name_or_id: str, output_directory: str, store: ObjectStore,
+           manifest: Manifest, rootless: bool = False) -> None:
     pipeline = manifest[name_or_id]
     obj = store.get(pipeline.id)
     dest = os.path.join(output_directory, name_or_id)
 
-    skip_preserve_owner = \
+    skip_preserve_owner = rootless or \
         os.getenv("OSBUILD_EXPORT_FORCE_NO_PRESERVE_OWNER") == "1"
     os.makedirs(dest, exist_ok=True)
     obj.export(dest, skip_preserve_owner=skip_preserve_owner)
@@ -107,6 +108,8 @@ def parse_arguments(sys_argv: List[str]) -> argparse.Namespace:
                         help="open debug shell when executing stage. Accepts stage name or id or * (for all)")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="suppress normal output")
+    parser.add_argument("--rootless", action="store_true",
+                        help="run the build without root privileges using user namespaces")
 
     return parser.parse_args(sys_argv[1:])
 
@@ -171,8 +174,12 @@ def osbuild_cli() -> int:
     if not monitor_name:
         monitor_name = "NullMonitor" if (args.json or args.quiet) else "LogMonitor"
 
+    rootless = args.rootless
+    if rootless:
+        os.environ["OSBUILD_ROOTLESS"] = "1"
+
     try:
-        with ObjectStore(args.cache) as object_store:
+        with ObjectStore(args.cache, rootless=rootless) as object_store:
             if args.cache_max_size is not None:
                 object_store.maximum_size = args.cache_max_size
 
@@ -193,7 +200,8 @@ def osbuild_cli() -> int:
                 args.libdir,
                 debug_break,
                 in_vm=in_vm,
-                stage_timeout=stage_timeout
+                stage_timeout=stage_timeout,
+                rootless=rootless
             )
             if r["success"]:
                 monitor.log(f"manifest {args.manifest_path} finished successfully\n", origin="osbuild.main_cli")
@@ -203,7 +211,7 @@ def osbuild_cli() -> int:
 
             if r["success"] and exports:
                 for pid in exports:
-                    export(pid, output_directory, object_store, manifest)
+                    export(pid, output_directory, object_store, manifest, rootless=rootless)
 
             if args.json:
                 r = fmt.output(manifest, r, object_store)

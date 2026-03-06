@@ -1231,7 +1231,7 @@ class FsCache(contextlib.AbstractContextManager, os.PathLike):
 
         self._load_cache_info(info)
 
-    def store_tree(self, name: str, tree: Any):
+    def store_tree(self, name: str, tree: Any, rootless: bool = False):
         """Store file system tree in cache
 
         Create a new entry in the object store containing a copy of the file
@@ -1255,18 +1255,28 @@ class FsCache(contextlib.AbstractContextManager, os.PathLike):
             Name to store the object under.
         tree:
             Path to the file system tree to copy.
+        rootless:
+            If True, run cp inside a user namespace to handle restricted files.
         """
 
         with self.store(name) as rpath_data:
+            cmd = []
+            if rootless:
+                cmd += ["unshare", "--map-auto", "--map-root-user", "--"]
+            cmd += [
+                "cp",
+                "--reflink=auto",
+                "-a",
+            ]
+            if rootless:
+                cmd += ["--no-preserve=ownership"]
+            cmd += [
+                "--",
+                os.fspath(tree),
+                self._path(rpath_data),
+            ]
             r = subprocess.run(
-                [
-                    "cp",
-                    "--reflink=auto",
-                    "-a",
-                    "--",
-                    os.fspath(tree),
-                    self._path(rpath_data),
-                ],
+                cmd,
                 check=False,
                 encoding="utf-8",
                 stderr=subprocess.STDOUT,

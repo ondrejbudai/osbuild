@@ -108,7 +108,7 @@ class Object:
         def __fspath__(self):
             return self.path
 
-    def __init__(self, cache: FsCache, uid: str, mode: Mode):
+    def __init__(self, cache: FsCache, uid: str, mode: Mode, rootless: bool = False):
         self._cache = cache
         self._mode = mode
         self._id = uid
@@ -116,6 +116,7 @@ class Object:
         self._meta: Optional[Object.Metadata] = None
         self._stack: Optional[contextlib.ExitStack] = None
         self.source_epoch = None  # see finalize()
+        self._rootless = rootless
 
     def _open_for_reading(self):
         name = self._stack.enter_context(
@@ -181,22 +182,32 @@ class Object:
     def mode(self) -> Mode:
         return self._mode
 
+    @staticmethod
+    def _rootless_cp_prefix():
+        """Prefix for cp commands in rootless mode to handle restricted files"""
+        return ["unshare", "--map-auto", "--map-root-user", "--"]
+
     def init(self, base: "Object"):
         """Initialize the object with the base object"""
         self._check_mode(Object.Mode.WRITE)
         assert self.active
         assert self._path
 
-        subprocess.run(
-            [
-                "cp",
-                "--reflink=auto",
-                "-a",
-                os.fspath(base.path) + "/.",
-                os.fspath(self.path),
-            ],
-            check=True,
-        )
+        cmd = []
+        if self._rootless:
+            cmd += self._rootless_cp_prefix()
+        cmd += [
+            "cp",
+            "--reflink=auto",
+            "-a",
+        ]
+        if self._rootless:
+            cmd += ["--no-preserve=ownership"]
+        cmd += [
+            os.fspath(base.path) + "/.",
+            os.fspath(self.path),
+        ]
+        subprocess.run(cmd, check=True)
 
     @property
     def path(self) -> str:
@@ -261,7 +272,10 @@ class Object:
 
     def export(self, to_directory: PathLike, skip_preserve_owner=False):
         """Copy object into an external directory"""
-        cp_cmd = [
+        cp_cmd = []
+        if self._rootless:
+            cp_cmd += self._rootless_cp_prefix()
+        cp_cmd += [
             "cp",
             "--reflink=auto",
             "-a",
@@ -288,9 +302,10 @@ class HostTree:
 
     _root: Optional[tempfile.TemporaryDirectory]
 
-    def __init__(self, store):
+    def __init__(self, store, rootless=False):
         self.store = store
         self._root = None
+        self._rootless = rootless
         self.init()
 
     def init(self):
@@ -300,22 +315,31 @@ class HostTree:
         self._root = self.store.tempdir(prefix="host")
 
         root = self._root.name
-        # Create a bare bones root file system. Starting with just
-        # /usr mounted from the host.
-        usr = os.path.join(root, "usr")
-        os.makedirs(usr)
-        # Also add in /etc/containers, which will allow us to access
-        # /etc/containers/policy.json and enable moving containers
-        # (skopeo): https://github.com/osbuild/osbuild/pull/1410
-        # If https://github.com/containers/image/issues/2157 ever gets
-        # fixed we can probably remove this bind mount.
-        etc_containers = os.path.join(root, "etc", "containers")
-        os.makedirs(etc_containers)
 
-        # ensure / is read-only
-        mount(root, root)
-        mount("/usr", usr)
-        mount("/etc/containers", etc_containers)
+        if self._rootless:
+            # In rootless mode, use symlinks instead of bind mounts
+            os.symlink("/usr", os.path.join(root, "usr"))
+            etc = os.path.join(root, "etc")
+            os.makedirs(etc)
+            if os.path.isdir("/etc/containers"):
+                os.symlink("/etc/containers", os.path.join(etc, "containers"))
+        else:
+            # Create a bare bones root file system. Starting with just
+            # /usr mounted from the host.
+            usr = os.path.join(root, "usr")
+            os.makedirs(usr)
+            # Also add in /etc/containers, which will allow us to access
+            # /etc/containers/policy.json and enable moving containers
+            # (skopeo): https://github.com/osbuild/osbuild/pull/1410
+            # If https://github.com/containers/image/issues/2157 ever gets
+            # fixed we can probably remove this bind mount.
+            etc_containers = os.path.join(root, "etc", "containers")
+            os.makedirs(etc_containers)
+
+            # ensure / is read-only
+            mount(root, root)
+            mount("/usr", usr)
+            mount("/etc/containers", etc_containers)
 
     @property
     def tree(self) -> os.PathLike:
@@ -325,7 +349,8 @@ class HostTree:
 
     def cleanup(self):
         if self._root:
-            umount(self._root.name)
+            if not self._rootless:
+                umount(self._root.name)
             self._root.cleanup()
             self._root = None
 
@@ -334,7 +359,7 @@ class HostTree:
 
 
 class ObjectStore(contextlib.AbstractContextManager):
-    def __init__(self, store: PathLike, read_only: bool = False):
+    def __init__(self, store: PathLike, read_only: bool = False, rootless: bool = False):
         self.cache = FsCache("osbuild", store)
         self.tmp = os.path.join(store, "tmp")
         os.makedirs(self.store, exist_ok=True)
@@ -344,6 +369,7 @@ class ObjectStore(contextlib.AbstractContextManager):
         self._host_tree: Optional[HostTree] = None
         self._stack = contextlib.ExitStack()
         self._read_only = read_only
+        self.rootless = rootless
 
     def _get_floating(self, object_id: str) -> Optional[Object]:
         """Internal: get a non-committed object"""
@@ -380,7 +406,7 @@ class ObjectStore(contextlib.AbstractContextManager):
         assert self.active
 
         if not self._host_tree:
-            self._host_tree = HostTree(self)
+            self._host_tree = HostTree(self, rootless=self.rootless)
         return self._host_tree
 
     def contains(self, object_id):
@@ -398,9 +424,27 @@ class ObjectStore(contextlib.AbstractContextManager):
 
     def tempdir(self, prefix=None, suffix=None):
         """Return a tempfile.TemporaryDirectory within the store"""
-        return tempfile.TemporaryDirectory(dir=self.tmp,
-                                           prefix=prefix,
-                                           suffix=suffix)
+        td = tempfile.TemporaryDirectory(dir=self.tmp,
+                                         prefix=prefix,
+                                         suffix=suffix)
+        if self.rootless:
+            # Override cleanup to handle files with restrictive permissions
+            # created inside user namespaces with subordinate UID/GID mapping.
+            # We capture td.name via the closure since we're replacing the
+            # cleanup method on the same object.
+            original_cleanup = td.cleanup
+            def rootless_cleanup():
+                subprocess.run(
+                    ["unshare", "--map-auto", "--map-root-user", "--",
+                     "rm", "-rf", "--", td.name],
+                    check=False
+                )
+                try:
+                    original_cleanup()
+                except Exception as e:
+                    print(f"rootless cleanup fallback failed: {e}")
+            td.cleanup = rootless_cleanup
+        return td
 
     def get(self, object_id):
         assert self.active
@@ -410,7 +454,7 @@ class ObjectStore(contextlib.AbstractContextManager):
             return obj
 
         try:
-            obj = Object(self.cache, object_id, Object.Mode.READ)
+            obj = Object(self.cache, object_id, Object.Mode.READ, rootless=self.rootless)
             self._stack.enter_context(obj)
             return obj
         except FsCache.MissError:
@@ -426,7 +470,7 @@ class ObjectStore(contextlib.AbstractContextManager):
         assert self.active
         self._ensure_writable()
 
-        obj = Object(self.cache, object_id, Object.Mode.WRITE)
+        obj = Object(self.cache, object_id, Object.Mode.WRITE, rootless=self.rootless)
         self._stack.enter_context(obj)
 
         self._objs.add(obj)
@@ -452,7 +496,8 @@ class ObjectStore(contextlib.AbstractContextManager):
         # goes through the same code path
         obj.clamp_mtime()
 
-        self.cache.store_tree(object_id, obj.path + "/.")
+        self.cache.store_tree(object_id, obj.path + "/.",
+                              rootless=self.rootless)
 
     def cleanup(self):
         """Cleanup all created Objects that are still alive"""
@@ -506,6 +551,7 @@ class StoreServer(api.BaseAPI):
     def __init__(self, store: ObjectStore, *, socket_address=None):
         super().__init__(socket_address)
         self.store = store
+        self.rootless = store.rootless
         self.tmproot = store.tempdir(prefix="store-server-")
         self._stack = contextlib.ExitStack()
 
@@ -536,8 +582,18 @@ class StoreServer(api.BaseAPI):
 
         try:
             source = os.path.join(obj, subtree.lstrip("/"))
-            mount(source, target)
-            self._stack.callback(umount, target)
+            if self.rootless:
+                # In rootless mode, copy the tree instead of bind mount.
+                # Symlinks don't work because the target path isn't
+                # accessible inside the bwrap container.
+                cmd = ["unshare", "--map-auto", "--map-root-user", "--",
+                       "cp", "--reflink=auto", "-a",
+                       os.fspath(source) + "/.",
+                       os.fspath(target)]
+                subprocess.run(cmd, check=True)
+            else:
+                mount(source, target)
+                self._stack.callback(umount, target)
 
         # pylint: disable=broad-except
         except Exception as e:

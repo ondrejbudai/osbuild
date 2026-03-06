@@ -49,6 +49,7 @@ class BaseAPI(abc.ABC):
         self.event_loop = None
         self.thread = None
         self._socketdir = None
+        self._rundir = "/run/osbuild"
 
     @abc.abstractmethod
     def _message(self, msg: Dict, fds: jsoncomm.FdSet, sock: jsoncomm.Socket):
@@ -66,6 +67,10 @@ class BaseAPI(abc.ABC):
         """Called to create the temporary socket dir"""
         os.makedirs(rundir, exist_ok=True)
         return tempfile.TemporaryDirectory(prefix="api-", dir=rundir)
+
+    def set_rundir(self, rundir: PathLike):
+        """Override the default run directory for socket creation"""
+        self._rundir = rundir
 
     def _dispatch(self, sock: jsoncomm.Socket):
         """Called when data is available on the socket"""
@@ -103,7 +108,7 @@ class BaseAPI(abc.ABC):
         assert not self.running
 
         if not self.socket_address:
-            self._socketdir = self._make_socket_dir()
+            self._socketdir = self._make_socket_dir(self._rundir)
             address = os.path.join(self._socketdir.name, self.endpoint)
             self.socket_address = address
 
