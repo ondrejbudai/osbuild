@@ -8,6 +8,10 @@ from osbuild.util import parsing, selinux
 
 
 def main(args):
+    if os.environ.get("OSBUILD_ROOTLESS"):
+        print("skipping selinux labeling in rootless mode")
+        return 0
+
     # Get the path where the tree is
     tree = args["tree"]
     options = args["options"]
