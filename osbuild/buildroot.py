@@ -87,10 +87,15 @@ class BuildRoot(contextlib.AbstractContextManager):
     are retained.
     """
 
-    def __init__(self, root, runner, libdir, var, *, rundir="/run/osbuild"):
+    def __init__(self, root, runner, libdir, var, *, rundir="/run/osbuild", rootless=False):
         self._exitstack = None
         self._rootdir = root
-        self._rundir = rundir
+        if rootless:
+            # In rootless mode, /run/osbuild is not writable; use the
+            # var directory (which is under the cache) for temp files
+            self._rundir = var
+        else:
+            self._rundir = rundir
         self._vardir = var
         self._libdir = libdir
         self._runner = runner
@@ -101,6 +106,7 @@ class BuildRoot(contextlib.AbstractContextManager):
         self.tmp = None
         self.mount_boot = True
         self.caps = None
+        self.rootless = rootless
 
     @staticmethod
     def _bind_dev(path, name):
@@ -144,15 +150,16 @@ class BuildRoot(contextlib.AbstractContextManager):
             self.proc = ProcOverrides(proc)
             self.proc.cmdline = "root=/dev/osbuild"
 
-            subprocess.run(["mount", "-t", "tmpfs", "-o", "nosuid", "none", self.dev], check=True)
-            self._exitstack.callback(lambda: subprocess.run(["umount", "--lazy", self.dev], check=True))
+            if not self.rootless:
+                subprocess.run(["mount", "-t", "tmpfs", "-o", "nosuid", "none", self.dev], check=True)
+                self._exitstack.callback(lambda: subprocess.run(["umount", "--lazy", self.dev], check=True))
 
-            self._bind_dev(self.dev, "full")
-            self._bind_dev(self.dev, "null")
-            self._bind_dev(self.dev, "random")
-            self._bind_dev(self.dev, "urandom")
-            self._bind_dev(self.dev, "tty")
-            self._bind_dev(self.dev, "zero")
+                self._bind_dev(self.dev, "full")
+                self._bind_dev(self.dev, "null")
+                self._bind_dev(self.dev, "random")
+                self._bind_dev(self.dev, "urandom")
+                self._bind_dev(self.dev, "tty")
+                self._bind_dev(self.dev, "zero")
 
             # Prepare all registered API endpoints
             for api in self._apis:
@@ -201,7 +208,7 @@ class BuildRoot(contextlib.AbstractContextManager):
             imports.insert(0, "boot")
 
         for p in imports:
-            source = os.path.join(self._rootdir, p)
+            source = os.path.realpath(os.path.join(self._rootdir, p))
             if os.path.isdir(source) and not os.path.islink(source):
                 mounts += ["--ro-bind", source, os.path.join("/", p)]
 
@@ -212,7 +219,12 @@ class BuildRoot(contextlib.AbstractContextManager):
         mounts += ["--symlink", "usr/sbin", "/sbin"]
 
         # Setup /dev.
-        mounts += ["--dev-bind", self.dev, "/dev"]
+        if self.rootless:
+            # In rootless mode, use bwrap's --dev to create a minimal /dev
+            # with standard device nodes, avoiding mknod and tmpfs mount
+            mounts += ["--dev", "/dev"]
+        else:
+            mounts += ["--dev-bind", self.dev, "/dev"]
         mounts += ["--tmpfs", "/dev/shm"]
 
         # Setup temporary/data file-systems.
@@ -228,7 +240,8 @@ class BuildRoot(contextlib.AbstractContextManager):
         # Setup API file-systems.
         mounts += ["--proc", "/proc"]
         mounts += ["--ro-bind", "/sys", "/sys"]
-        mounts += ["--ro-bind-try", "/sys/fs/selinux", "/sys/fs/selinux"]
+        if not self.rootless:
+            mounts += ["--ro-bind-try", "/sys/fs/selinux", "/sys/fs/selinux"]
 
         # There was a bug in mke2fs (fixed in versionv 1.45.7) where mkfs.ext4
         # would fail because the default config, created on the fly, would
@@ -297,6 +310,15 @@ class BuildRoot(contextlib.AbstractContextManager):
             "--unshare-net"
         ]
 
+        if self.rootless:
+            # Wrap with unshare to create a user namespace with full
+            # subordinate UID/GID mapping. This allows chown() to any
+            # UID/GID inside the namespace, which is needed for rpm
+            # package installation. bwrap runs inside this namespace
+            # without --unshare-user (it reuses the parent userns).
+            cmd = ["unshare", "--map-auto", "--map-root-user", "--"] + cmd
+            cmd += ["--cap-add", "ALL"]
+
         cmd += self.build_capabilities_args()
 
         cmd += mounts
@@ -313,6 +335,9 @@ class BuildRoot(contextlib.AbstractContextManager):
             "PYTHONUNBUFFERED": "1",
             "TERM": os.getenv("TERM", "dumb"),
         }
+
+        if self.rootless:
+            env["OSBUILD_ROOTLESS"] = "1"
         if extra_env:
             env.update(extra_env)
 
@@ -358,6 +383,11 @@ class BuildRoot(contextlib.AbstractContextManager):
     def build_capabilities_args(self):
         """Build the capabilities arguments for bubblewrap"""
         args = []
+
+        # In rootless mode, capabilities are meaningless since we operate
+        # inside a user namespace. Skip capability management entirely.
+        if self.rootless:
+            return args
 
         # If no capabilities are explicitly requested we retain all of them
         if self.caps is None:
