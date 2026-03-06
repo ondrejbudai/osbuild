@@ -29,7 +29,10 @@ def sysusers():
             check=True,
         )
     except subprocess.CalledProcessError as error:
-        sys.stderr.write(error.stdout)
+        output = error.stdout
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        sys.stderr.write(output)
         sys.exit(1)
 
 
@@ -88,10 +91,11 @@ def sequoia():
     # This provides a default set of crypto-policies which is important for
     # re-enabling SHA1 support with rpm (so we can cross-build CentOS-Stream-9
     # images).
+    src = "/usr/share/crypto-policies/back-ends/DEFAULT"
+    if not os.path.isdir(src):
+        return
     os.makedirs("/etc/crypto-policies", exist_ok=True)
-    shutil.copytree(
-        "/usr/share/crypto-policies/back-ends/DEFAULT", "/etc/crypto-policies/back-ends"
-    )
+    shutil.copytree(src, "/etc/crypto-policies/back-ends")
 
 
 def quirks():
