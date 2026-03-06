@@ -13,6 +13,7 @@ removed.
 
 import os
 import shutil
+import subprocess
 
 import osbuild.util.linux as linux
 
@@ -105,6 +106,19 @@ def rmtree(path: str):
             unlink(p)
         else:
             raise e
+
+    # In rootless mode, trees built inside user namespaces contain
+    # files owned by subordinate UIDs with restrictive permissions
+    # (e.g. shadow files with mode 0000). Use unshare to get
+    # DAC_OVERRIDE for deleting them.
+    if os.environ.get("OSBUILD_ROOTLESS") and os.getuid() != 0:
+        r = subprocess.run(
+            ["unshare", "--map-auto", "--map-root-user", "--",
+             "rm", "-rf", "--", path],
+            check=False
+        )
+        if r.returncode == 0:
+            return
 
     # "onerror" can be replaced with "onexc" once we move to python 3.12
     shutil.rmtree(path, onerror=on_error)  # pylint: disable=deprecated-argument
