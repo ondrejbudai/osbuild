@@ -1,0 +1,42 @@
+{
+  "summary": "Create a populated FAT filesystem image",
+  "description": [
+    "Creates a FAT filesystem image populated from an input tree.",
+    "Uses mkfs.vfat + mcopy to avoid loop devices (rootless-compatible)."
+  ],
+  "schema_2": {
+    "options": {
+      "additionalProperties": false,
+      "required": ["filename", "size"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Path to the output image file (relative to tree)"
+        },
+        "size": {
+          "type": "string",
+          "description": "Size of the image (e.g. '20MB')"
+        },
+        "label": {
+          "type": "string",
+          "description": "Label for the filesystem"
+        },
+        "volid": {
+          "type": "string",
+          "description": "Volume ID for the filesystem"
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree"],
+      "properties": {
+        "tree": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

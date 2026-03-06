@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+"""
+Create a populated FAT filesystem image
+
+Creates a FAT filesystem image file at the specified location in the
+tree, populated with the contents of the input tree. This stage uses
+`mkfs.vfat` to create the filesystem and `mcopy` from mtools to
+populate it, avoiding the need for loop devices or mount operations.
+
+This is a rootless-compatible alternative to the loopback+mkfs+mount+copy
+pipeline used by the standard ISO build.
+"""
+
+import os
+import subprocess
+import sys
+
+import osbuild.api
+from osbuild.util.parsing import parse_size
+
+
+def main(tree, inputs, options):
+    filename = options["filename"]
+    size = options["size"]
+    label = options.get("label")
+    volid = options.get("volid")
+
+    output = os.path.join(tree, filename.lstrip("/"))
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+
+    source_tree = inputs["tree"]["path"]
+
+    size_bytes = parse_size(size)
+    with open(output, "wb") as f:
+        f.truncate(size_bytes)
+
+    mkfs_cmd = ["mkfs.vfat"]
+    if label:
+        mkfs_cmd += ["-n", label]
+    if volid:
+        mkfs_cmd += ["-i", volid]
+    mkfs_cmd += [output]
+    print(f"Creating FAT image: {output}")
+    subprocess.run(mkfs_cmd, check=True)
+
+    # Populate using mcopy from mtools. -s copies recursively,
+    # -i specifies the image, :: is the FAT root.
+    entries = os.listdir(source_tree)
+    if entries:
+        sources = [os.path.join(source_tree, e) for e in entries]
+        mcopy_cmd = ["mcopy", "-s", "-p", "-Q", "-i", output] + sources + ["::"]
+        print(f"Populating FAT image with {len(entries)} entries")
+        subprocess.run(mcopy_cmd, check=True)
+
+    return 0
+
+
+if __name__ == '__main__':
+    args = osbuild.api.arguments()
+    r = main(args["tree"], args["inputs"], args["options"])
+    sys.exit(r)

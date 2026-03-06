@@ -1,0 +1,42 @@
+{
+  "summary": "Create a populated ext4 filesystem image",
+  "description": [
+    "Creates an ext4 filesystem image populated from an input tree.",
+    "Uses mkfs.ext4 -d to avoid loop devices (rootless-compatible)."
+  ],
+  "schema_2": {
+    "options": {
+      "additionalProperties": false,
+      "required": ["filename", "size", "uuid"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Path to the output image file (relative to tree)"
+        },
+        "size": {
+          "type": "string",
+          "description": "Size of the image (e.g. '3GB')"
+        },
+        "uuid": {
+          "type": "string",
+          "description": "UUID for the filesystem"
+        },
+        "label": {
+          "type": "string",
+          "description": "Label for the filesystem"
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree"],
+      "properties": {
+        "tree": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+"""
+Create a populated ext4 filesystem image
+
+Creates an ext4 filesystem image file at the specified location in the
+tree, populated with the contents of the input tree. This stage uses
+`mkfs.ext4 -d` to create the filesystem directly from a directory,
+avoiding the need for loop devices or mount operations.
+
+This is a rootless-compatible alternative to the loopback+mkfs+mount+copy
+pipeline used by the standard ISO build.
+"""
+
+import os
+import subprocess
+import sys
+
+import osbuild.api
+from osbuild.util.parsing import parse_size
+
+
+def main(tree, inputs, options):
+    filename = options["filename"]
+    size = options["size"]
+    uuid = options["uuid"]
+    label = options.get("label")
+
+    output = os.path.join(tree, filename.lstrip("/"))
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+
+    source_tree = inputs["tree"]["path"]
+
+    size_bytes = parse_size(size)
+    with open(output, "wb") as f:
+        f.truncate(size_bytes)
+
+    cmd = ["mkfs.ext4", "-U", uuid]
+    if label:
+        cmd += ["-L", label]
+    cmd += ["-d", source_tree, output]
+
+    print(f"Creating ext4 image: {output}")
+    subprocess.run(cmd, check=True)
+
+    return 0
+
+
+if __name__ == '__main__':
+    args = osbuild.api.arguments()
+    r = main(args["tree"], args["inputs"], args["options"])
+    sys.exit(r)
