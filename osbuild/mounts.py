@@ -207,17 +207,36 @@ class FileSystemMountService(MountService):
 
         mountpoint = os.path.join(root, target.lstrip("/"))
 
-        options = self.translate_options(options)
-
         os.makedirs(mountpoint, exist_ok=True)
         self.mountpoint = mountpoint
 
         print(f"mounting {source} -> {mountpoint}")
 
+        mount_options = self.translate_options(options)
+
+        # In rootless mode, try FUSE-based mount first
+        if os.environ.get("OSBUILD_ROOTLESS"):
+            fuse_cmd = self._fuse_mount_cmd(source, mountpoint, options)
+            if fuse_cmd:
+                try:
+                    subprocess.run(fuse_cmd,
+                                   stderr=subprocess.STDOUT,
+                                   stdout=subprocess.PIPE,
+                                   check=True)
+                    self.check = True
+                    self._fuse_mounted = True
+                    return mountpoint
+                except subprocess.CalledProcessError as e:
+                    output = getattr(e, "output", "") or ""
+                    print(f"FUSE mount failed ({e}): {output}")
+                    print("falling back to regular mount")
+                except FileNotFoundError as e:
+                    print(f"FUSE mount tool not found ({e}), falling back to regular mount")
+
         try:
             subprocess.run(
                 ["mount"] +
-                options + [
+                mount_options + [
                     "--source", source,
                     "--target", mountpoint
                 ],
@@ -231,6 +250,10 @@ class FileSystemMountService(MountService):
 
         self.check = True
         return mountpoint
+
+    def _fuse_mount_cmd(self, source, mountpoint, options):
+        """Return FUSE mount command for rootless mode, or None"""
+        return None
 
     def umount(self):
         if not self.mountpoint:

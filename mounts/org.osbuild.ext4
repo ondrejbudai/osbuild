@@ -7,6 +7,7 @@ Mount a ext4 filesystem at the given location.
 Host commands used: mount
 """
 
+import subprocess
 import sys
 from typing import Dict
 
@@ -52,6 +53,25 @@ class Ext4Mount(mounts.FileSystemMountService):
 
     def translate_options(self, options: Dict):
         return ["-t", "ext4"] + super().translate_options(options)
+
+    def _fuse_mount_cmd(self, source, mountpoint, options):
+        """Use fuse2fs for rootless ext4 mounting"""
+        cmd = ["fuse2fs", source, mountpoint, "-o", "fakeroot"]
+        if options.get("readonly"):
+            cmd += ["-o", "ro"]
+        return cmd
+
+    def umount(self):
+        if not self.mountpoint:
+            return
+        self.sync()
+        if getattr(self, "_fuse_mounted", False):
+            subprocess.run(["fusermount3", "-u", self.mountpoint],
+                           check=self.check)
+        else:
+            subprocess.run(["umount", "-v", self.mountpoint],
+                           check=self.check)
+        self.mountpoint = None
 
 
 def main():
