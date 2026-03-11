@@ -12,6 +12,7 @@ import io
 import os
 import select
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Set
@@ -87,7 +88,8 @@ class BuildRoot(contextlib.AbstractContextManager):
     are retained.
     """
 
-    def __init__(self, root, runner, libdir, var, *, rundir="/run/osbuild", rootless=False):
+    def __init__(self, root, runner, libdir, var, *, rundir="/run/osbuild", rootless=False,
+                 xattr_cache_path=None):
         self._exitstack = None
         self._rootdir = root
         if rootless:
@@ -107,6 +109,7 @@ class BuildRoot(contextlib.AbstractContextManager):
         self.mount_boot = True
         self.caps = None
         self.rootless = rootless
+        self._xattr_cache_path = xattr_cache_path
 
     @staticmethod
     def _bind_dev(path, name):
@@ -240,7 +243,7 @@ class BuildRoot(contextlib.AbstractContextManager):
         # Setup API file-systems.
         mounts += ["--proc", "/proc"]
         mounts += ["--ro-bind", "/sys", "/sys"]
-        if not self.rootless:
+        if not self.rootless or self._xattr_cache_path:
             mounts += ["--ro-bind-try", "/sys/fs/selinux", "/sys/fs/selinux"]
 
         # There was a bug in mke2fs (fixed in versionv 1.45.7) where mkfs.ext4
@@ -316,7 +319,14 @@ class BuildRoot(contextlib.AbstractContextManager):
             # UID/GID inside the namespace, which is needed for rpm
             # package installation. bwrap runs inside this namespace
             # without --unshare-user (it reuses the parent userns).
-            cmd = ["unshare", "--map-auto", "--map-root-user", "--"] + cmd
+            if self._xattr_cache_path:
+                cmd = [
+                    "unshare", "--map-auto", "--map-root-user", "--",
+                    sys.executable, "-m", "osbuild.fake_xattr_supervisor",
+                    self._xattr_cache_path, "--",
+                ] + cmd
+            else:
+                cmd = ["unshare", "--map-auto", "--map-root-user", "--"] + cmd
             cmd += ["--cap-add", "ALL"]
 
         cmd += self.build_capabilities_args()

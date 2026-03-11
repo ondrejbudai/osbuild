@@ -16,6 +16,7 @@ from .objectstore import ObjectStore
 from .qemu import Qemu
 from .sources import Source
 from .util import experimentalflags, osrelease
+from .util.seccomp import is_supported_arch
 
 DEFAULT_CAPABILITIES = {
     "CAP_AUDIT_WRITE",
@@ -242,11 +243,13 @@ class Stage:
             libdir,
             debug_break="",
             timeout=None,
-            rootless=False) -> BuildResult:
+            rootless=False,
+            xattr_cache_path=None) -> BuildResult:
         with contextlib.ExitStack() as cm:
 
             build_root = buildroot.BuildRoot(build_tree, runner.path, libdir, store.tmp,
-                                             rootless=rootless)
+                                             rootless=rootless,
+                                             xattr_cache_path=xattr_cache_path)
             cm.enter_context(build_root)
 
             # if we have a build root, then also bind-mount the boot
@@ -450,6 +453,13 @@ class Pipeline:
         tree = object_store.new(self.id)
         tree.source_epoch = self.source_epoch
 
+        # Compute fake xattr cache path for rootless builds on supported
+        # architectures. On unsupported architectures (s390x, ppc64le),
+        # rootless builds proceed without xattr emulation.
+        xattr_cache_path = None
+        if rootless and is_supported_arch():
+            xattr_cache_path = os.path.join(tree.path, "meta", "fake_xattrs.json")
+
         todo = collections.deque()
         for stage in reversed(self.stages):
             base = object_store.get(stage.id)
@@ -509,7 +519,8 @@ class Pipeline:
                                       libdir,
                                       debug_break,
                                       stage_timeout,
-                                      rootless=rootless)
+                                      rootless=rootless,
+                                      xattr_cache_path=xattr_cache_path)
 
                 md = tree.meta.get(r.id)
                 monitor.result(r, md)
